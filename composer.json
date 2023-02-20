@@ -1,0 +1,20 @@
+{
+  "name": "b13/typo3-updater",
+  "description": "TYPO3 Composer Plugin to ease upgrades",
+  "license": "GPL-2.0-or-later",
+  "type": "composer-plugin",
+  "require": {
+    "composer/composer": "*",
+    "composer-plugin-api": "*"
+  },
+  "autoload": {
+    "psr-4": {
+      "B13\\Typo3Updater\\": "src/"
+    }
+  },
+  "extra": {
+    "class": "B13\\Typo3Updater\\Plugin",
+    "plugin-modifies-install-path": true,
+    "plugin-modifies-downloads": true
+  }
+}
