@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace B13\Typo3Updater\Command;
 
 use Composer\Command\BaseCommand;
+use Composer\Console\Application;
 use Composer\Console\Input\InputArgument;
 use Composer\Package\BasePackage;
 use Composer\Package\Package;
@@ -12,11 +13,14 @@ use Composer\Package\Version\VersionParser;
 use Composer\Repository\CompositeRepository;
 use Composer\Repository\InstalledRepositoryInterface;
 use Composer\Semver\Constraint\MatchAllConstraint;
+use Composer\Util\ProcessExecutor;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Helper\ProgressBar;
+use Symfony\Component\Console\Input\ArrayInput;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
+use Symfony\Component\Console\Question\ConfirmationQuestion;
 use Symfony\Component\Console\Style\SymfonyStyle;
 
 final class UpdateExtensionsCommand extends BaseCommand
@@ -63,6 +67,9 @@ EOT
         $coreVersion = $core->getVersion();
         $packages = $installedRepository->getPackages();
         $progressBar = $this->getProgressBar($packages, $io);
+        $rows = [];
+        $requirePackageCommands = [];
+
         foreach ($packages as $package) {
             if($package->getType() === 'typo3-cms-extension') {
                 $progressBar->setMessage($package->getName(), 'name');
@@ -74,16 +81,21 @@ EOT
                     $newVersionAvailable = $package->getVersion() !== $version->getVersion();
                     $flag = $newVersionAvailable ? '<fg=green>' . $version->getPrettyVersion() . '</>' : '-';
                     $row = [$version->getName(), $package->getPrettyVersion(), $flag, '✅', ];
+
                     if ($input->getArgument('version')) {
                         $compatible = $this->isCompatibleWithCore($version, $input->getArgument('version'), $installedRepository);
                         $nextCompatible = $newVersionAvailable && $compatible ? '⛔️️ Update to ' . $compatible->getPrettyVersion() . ' required' : '✅';
                         $row[] = $compatible ? $nextCompatible : '❌';
                     }
 
+                    if ($newVersionAvailable) {
+                        $requirePackageCommands[] = $version->getName() . ':^' . $version->getPrettyVersion();
+                    }
+
                     $rows[] = $row;
                 } else {
                     // @todo: double check if this is not used anymore?!
-                    $rows[] = [$package->getName(), '❌', $package->getName(), '❌'];
+                    $rows[] = [$package->getName(), $package->getPrettyVersion(), '-'];
                 }
             }
         }
@@ -92,13 +104,32 @@ EOT
         $progressBar->setMessage('', 'name');
         $progressBar->finish();
         $io->writeln('');
-        $tableHeader = ['Package', 'version', 'new version', $coreVersion];
+        $tableHeader = ['Package', 'Version', 'Latest compatible version', $coreVersion];
 
         if ($input->getArgument('version')) {
             $tableHeader[] = $input->getArgument('version') . ' (' . $targetCore->getFullPrettyVersion() . ')';
         }
 
         $io->table($tableHeader, $rows);
+
+        if(!empty($requirePackageCommands)) {
+            $question = new ConfirmationQuestion('Install available updates?', false);
+            $answer = $io->askQuestion($question);
+            if($answer) {
+                $info = ['Updating extensions', 'composer req ' . implode(" \ \n    ", $requirePackageCommands)];
+                $io->info($info);
+
+                $application = new Application();
+
+                $arrayInput = new ArrayInput(array('command' => 'require', 'packages' => $requirePackageCommands, '-W' => true, '--dry-run' => $input->getOption('dry-run')));
+                $exitCode = $application->run($arrayInput, $output);
+
+                if ($exitCode) {
+                    $this->getIO()->error('Failed to update TYPO3 extensions with all dependencies. See errors above');
+                    return Command::FAILURE;
+                }
+            }
+        }
 
         return Command::SUCCESS;
     }
