@@ -7,14 +7,16 @@ namespace B13\Typo3Updater\Command;
 use Composer\Command\BaseCommand;
 use Composer\Console\Application;
 use Composer\Console\Input\InputArgument;
+use Composer\Json\JsonFile;
 use Composer\Package\BasePackage;
+use Composer\Package\CompletePackage;
 use Composer\Package\Link;
 use Composer\Package\Package;
+use Composer\Package\RootPackage;
 use Composer\Package\Version\VersionParser;
 use Composer\Repository\CompositeRepository;
 use Composer\Repository\InstalledRepositoryInterface;
 use Composer\Repository\PathRepository;
-use Composer\Semver\Constraint\MatchAllConstraint;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Helper\ProgressBar;
 use Symfony\Component\Console\Input\ArrayInput;
@@ -133,7 +135,6 @@ EOT
             if ($input->getArgument('version')) {
                 $nextVersionForTarget = $package['compatible-with-next']['compatible-with-target'];
 
-
                 if($package['compatible-with-next']['new']) {
                     $next = '⛔️Update to ' . $package['compatible-with-next']['new']->getPrettyVersion() . ' required';
                 } else {
@@ -160,41 +161,69 @@ EOT
         $io->writeln('<options=bold,underscore>Legend:</>');
         $io->writeln('✅ = is compatible  ❌ = not compatible  ⛔️ = compatible after update to latest compatible version');
 
+        foreach ($processedPackages as $packageName => $package) {
+            if($package['version-recommended']) {
+                // $io->writeln('Version recommended ' . $package['version-recommended'] . ' for package ' . $packageName);
+
+                /** @var CompletePackage $requiredBy */
+                foreach ($requiredPackages[$packageName] as $requiredBy) {
+                    if(!($requiredBy instanceof RootPackage)) {
+                        $question = new ConfirmationQuestion('Bump ' . $packageName . ' version in required section of ' . $requiredBy->getName() . ' to version ' . $package['version-recommended'], false);
+                        $answer = $io->askQuestion($question);
+
+                        if($answer) {
+                            $requires = $requiredBy->getDistUrl() . '/composer.json';
+                            $composerJson = new JsonFile($requires);
+
+                            try {
+                                $updateRequired = $composerJson->read();
+                                $updateRequired['require'][$packageName] = "^" . $package['version-recommended'];
+                                // @todo: respect --dry-run option and just show the new constraint ??!?!
+                                $composerJson->write($updateRequired);
+                            } catch (\RuntimeException $exception) {
+                                $io->error($exception->getMessage());
+                                return Command::FAILURE;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if(!empty($requirePackageCommands)) {
-            $question = new ConfirmationQuestion('Show require command ?', false);
+            $info = ['To update all TYPO3 to the latest compatible version run: ', 'composer req ' . implode(" \ \n    ", $requirePackageCommands)];
+            $io->info($info);
+
+            $question = new ConfirmationQuestion('Run the require command show above ?', false);
             $answer = $io->askQuestion($question);
             if($answer) {
-                $info = ['Updating extensions', 'composer req ' . implode(" \ \n    ", $requirePackageCommands)];
-                $io->info($info);
+                $application = new Application();
 
-// @todo: run require command and bump version for local packages so constraints are in sync.
-//
-//                $application = new Application();
-//
-//                $arrayInput = new ArrayInput(array('command' => 'require', 'packages' => $requirePackageCommands, '-W' => true, '--dry-run' => $input->getOption('dry-run')));
-//                $exitCode = $application->run($arrayInput, $output);
-//
-//                if ($exitCode) {
-//                    $this->getIO()->error('Failed to update TYPO3 extensions with all dependencies. See errors above');
-//                    return Command::FAILURE;
-//                }
+                $arrayInput = new ArrayInput(array('command' => 'require', 'packages' => $requirePackageCommands, '--dry-run' => $input->getOption('dry-run')));
+                $exitCode = $application->run($arrayInput, $output);
+
+                if ($exitCode) {
+                    $this->getIO()->error('Failed to update TYPO3 extensions with all dependencies. See errors above');
+                    return Command::FAILURE;
+                }
             }
         }
 
         return Command::SUCCESS;
     }
 
-    public function loadPackageVersions(string $packageName, CompositeRepository $remoteRepositories): array
+    public function loadPackageVersions(Package $package, CompositeRepository $remoteRepositories): array
     {
+        $versionParser = new VersionParser();
         $packagesToLoad = [];
-        $packagesToLoad[$packageName] = new MatchAllConstraint();
+        $packagesToLoad[$package->getName()] = $versionParser->parseConstraints('>' . $package->getVersion());
 
         return $remoteRepositories->loadPackages($packagesToLoad, ['stable' => BasePackage::STABILITY_STABLE], []);
     }
 
     private function getLatestCompatibleVersion(Package $currentPackageVersion, InstalledRepositoryInterface $installedRepository, CompositeRepository $remoteRepositories): Package
     {
-        $versions = $this->loadPackageVersions($currentPackageVersion->getName(), $remoteRepositories);
+        $versions = $this->loadPackageVersions($currentPackageVersion, $remoteRepositories);
 
         /** @var Package $version */
         foreach ($versions['packages'] as $version) {
@@ -225,7 +254,7 @@ EOT
 
     private function getLatestCoreCompatibleVersion(Package $currentPackageVersion, InstalledRepositoryInterface $installedRepository, CompositeRepository $remoteRepositories, InputInterface $input): Package
     {
-        $versions = $this->loadPackageVersions($currentPackageVersion->getName(), $remoteRepositories);
+        $versions = $this->loadPackageVersions($currentPackageVersion, $remoteRepositories);
 
         /** @var Package $version */
         foreach ($versions['packages'] as $version) {
