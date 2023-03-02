@@ -61,7 +61,7 @@ EOT
         $core = $installedRepository->findPackage('typo3/cms-core', '*');
 
         if (!$core) {
-            throw new \RuntimeException('Package typo3/cms-core not installed. Please run "composer install"');
+            throw new \RuntimeException('Package typo3/cms-core is not installed. Please run "composer install"');
         }
 
         $localPackages = [$rootPackage];
@@ -75,7 +75,7 @@ EOT
         /** @var Package $package */
         foreach ($localPackages as $package) {
             /** @var Link $require */
-            foreach ($package->getRequires() as $require) {
+            foreach ($package->getRequires() + $package->getDevRequires() as $require) {
                 $requiredPackages[$require->getTarget()][$package->getName()] = $package;
             }
         }
@@ -102,7 +102,6 @@ EOT
                 $version = $this->getLatestCompatibleVersion($package, $installedRepository, $remoteRepositories);
 
                 $newVersionAvailable =  version_compare($package->getVersion(), $version->getVersion(), 'lt');
-                //$row = [$version->getName(), $package->getPrettyVersion(), $flag, '✅', ];
                 $processedPackages[$version->getName()] = [
                     'name' => $version->getName(),
                     'version-installed' => $package->getPrettyVersion(),
@@ -164,8 +163,6 @@ EOT
 
         foreach ($processedPackages as $packageName => $package) {
             if($package['version-recommended']) {
-                // $io->writeln('Version recommended ' . $package['version-recommended'] . ' for package ' . $packageName);
-
                 /** @var CompletePackage $requiredBy */
                 foreach ($requiredPackages[$packageName] as $requiredBy) {
                     if(!($requiredBy instanceof RootPackage)) {
@@ -228,11 +225,13 @@ EOT
 
         /** @var Package $version */
         foreach ($versions['packages'] as $version) {
-            $requiredPackages = $version->getRequires();
+            $requiredPackages = $version->getRequires() + $version->getDevRequires();
             $compatibleVersion = true;
 
             foreach ($requiredPackages as $package) {
                 // Load package from local/installed repo
+                // @todo: find a way to use the constraint here, as it avoids unnecessary filtering
+                // $requiredPackage = $installedRepository->findPackage($package->getTarget(), '>= ' . $currentPackageVersion->getVersion());
                 $requiredPackage = $installedRepository->findPackage($package->getTarget(), '*');
 
                 if($requiredPackage && ($requiredPackage->getType() === 'typo3-cms-framework' || $requiredPackage->getType() === 'typo3-cms-extension')) {
@@ -259,9 +258,6 @@ EOT
 
         /** @var Package $version */
         foreach ($versions['packages'] as $version) {
-            $requiredPackages = $version->getRequires();
-            $compatibleVersion = true;
-
             // Return the first (latest) compatible version
             if($this->isCompatibleWithCore($version, $input->getArgument('version'), $installedRepository)) {
                 return $version;
@@ -273,7 +269,7 @@ EOT
 
     private function isCompatibleWithCore(PackageInterface $packageVersion, string $constraint, InstalledRepositoryInterface $installedRepository): ?PackageInterface
     {
-        $requiredPackages = $packageVersion->getRequires();
+        $requiredPackages = $packageVersion->getRequires() + $packageVersion->getDevRequires();
         $compatibleVersion = true;
 
         foreach ($requiredPackages as $package) {
