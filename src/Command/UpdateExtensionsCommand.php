@@ -12,6 +12,7 @@ use Composer\Package\BasePackage;
 use Composer\Package\CompletePackage;
 use Composer\Package\Link;
 use Composer\Package\Package;
+use Composer\Package\PackageInterface;
 use Composer\Package\RootPackage;
 use Composer\Package\Version\VersionParser;
 use Composer\Repository\CompositeRepository;
@@ -86,8 +87,8 @@ EOT
             return Command::FAILURE;
         }
 
-        $coreVersion = $core->getVersion();
-        $packages = $installedRepository->getPackages();
+        $coreVersion = $core->getPrettyVersion();
+        // $packages = $installedRepository->getPackages();
         $progressBar = $this->getProgressBar($requiredPackages, $io);
         $rows = [];
         $requirePackageCommands = [];
@@ -106,7 +107,7 @@ EOT
                     'name' => $version->getName(),
                     'version-installed' => $package->getPrettyVersion(),
                     'version-recommended' => $newVersionAvailable ? $version->getPrettyVersion() : null,
-                    'compatible-with-current' => $this->isCompatibleWithCore($version, $core->getPrettyVersion(), $installedRepository)
+                    'compatible-with-current' => $this->isCompatibleWithCore($version, $core->getVersion(), $installedRepository)
                 ];
 
                 if($newVersionAvailable) {
@@ -136,7 +137,7 @@ EOT
                 $nextVersionForTarget = $package['compatible-with-next']['compatible-with-target'];
 
                 if($package['compatible-with-next']['new']) {
-                    $next = '⛔️Update to ' . $package['compatible-with-next']['new']->getPrettyVersion() . ' required';
+                    $next = '⬆️ Update to ' . $package['compatible-with-next']['new']->getPrettyVersion() . ' required';
                 } else {
                     $next = '❌ ' . ($nextVersionForTarget ? 'version ' . $nextVersionForTarget . ' would be compatible ' : '');
                 }
@@ -154,12 +155,12 @@ EOT
         $tableHeader = ['Package', 'Version', 'Latest compatible version', $coreVersion];
 
         if ($input->getArgument('version')) {
-            $tableHeader[] = $input->getArgument('version') . ' (' . $targetCore->getFullPrettyVersion() . ')';
+            $tableHeader[] = $input->getArgument('version') . ' (' . $targetCore->getPrettyVersion() . ')';
         }
 
         $io->table($tableHeader, $rows);
         $io->writeln('<options=bold,underscore>Legend:</>');
-        $io->writeln('✅ = is compatible  ❌ = not compatible  ⛔️ = compatible after update to latest compatible version');
+        $io->writeln('✅ = is compatible  ❌ = not compatible  ⬆️= compatible after update to latest compatible version');
 
         foreach ($processedPackages as $packageName => $package) {
             if($package['version-recommended']) {
@@ -191,7 +192,7 @@ EOT
         }
 
         if(!empty($requirePackageCommands)) {
-            $info = ['To update all TYPO3 to the latest compatible version run: ', 'composer req ' . implode(" \ \n    ", $requirePackageCommands)];
+            $info = ['To update all TYPO3 to the latest compatible version run: ', 'composer req ' . implode(" ", $requirePackageCommands)];
             $io->info($info);
 
             $question = new ConfirmationQuestion('Run the require command show above ?', false);
@@ -212,7 +213,7 @@ EOT
         return Command::SUCCESS;
     }
 
-    public function loadPackageVersions(Package $package, CompositeRepository $remoteRepositories): array
+    public function loadPackageVersions(PackageInterface $package, CompositeRepository $remoteRepositories): array
     {
         $versionParser = new VersionParser();
         $packagesToLoad = [];
@@ -221,7 +222,7 @@ EOT
         return $remoteRepositories->loadPackages($packagesToLoad, ['stable' => BasePackage::STABILITY_STABLE], []);
     }
 
-    private function getLatestCompatibleVersion(Package $currentPackageVersion, InstalledRepositoryInterface $installedRepository, CompositeRepository $remoteRepositories): Package
+    private function getLatestCompatibleVersion(PackageInterface $currentPackageVersion, InstalledRepositoryInterface $installedRepository, CompositeRepository $remoteRepositories): PackageInterface
     {
         $versions = $this->loadPackageVersions($currentPackageVersion, $remoteRepositories);
 
@@ -252,7 +253,7 @@ EOT
         return $currentPackageVersion;
     }
 
-    private function getLatestCoreCompatibleVersion(Package $currentPackageVersion, InstalledRepositoryInterface $installedRepository, CompositeRepository $remoteRepositories, InputInterface $input): Package
+    private function getLatestCoreCompatibleVersion(PackageInterface $currentPackageVersion, InstalledRepositoryInterface $installedRepository, CompositeRepository $remoteRepositories, InputInterface $input): Package
     {
         $versions = $this->loadPackageVersions($currentPackageVersion, $remoteRepositories);
 
@@ -270,7 +271,7 @@ EOT
         return $currentPackageVersion;
     }
 
-    private function isCompatibleWithCore(Package $packageVersion, string $constraint, InstalledRepositoryInterface $installedRepository): ?Package
+    private function isCompatibleWithCore(PackageInterface $packageVersion, string $constraint, InstalledRepositoryInterface $installedRepository): ?PackageInterface
     {
         $requiredPackages = $packageVersion->getRequires();
         $compatibleVersion = true;
