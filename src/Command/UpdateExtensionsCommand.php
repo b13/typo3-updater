@@ -44,6 +44,8 @@ in conjunction with the currently installed TYPO3 version.
 <options=bold,underscore>Features:</>
  * Show available updates (major and minor) compatible with the current TYPO3 version
  * Show extension compatability for the target version of TYPO3 (if 'version' argument is set)
+ * Bump version of local packages in required section (question)
+ * Update packages to most recent compatible version (question)
 
 EOT
             );
@@ -166,16 +168,21 @@ EOT
                 /** @var CompletePackage $requiredBy */
                 foreach ($requiredPackages[$packageName] as $requiredBy) {
                     if(!($requiredBy instanceof RootPackage)) {
+                        $requires = $requiredBy->getDistUrl() . '/composer.json';
+                        $composerJson = new JsonFile($requires);
+                        $updateRequired = $composerJson->read();
+
+                        if($updateRequired['require'][$packageName] === "*") {
+                            continue;
+                        }
+
                         $question = new ConfirmationQuestion('Bump ' . $packageName . ' version in required section of ' . $requiredBy->getName() . ' to version ' . $package['version-recommended'], false);
                         $answer = $io->askQuestion($question);
 
                         if($answer) {
-                            $requires = $requiredBy->getDistUrl() . '/composer.json';
-                            $composerJson = new JsonFile($requires);
 
                             try {
-                                $updateRequired = $composerJson->read();
-                                $updateRequired['require'][$packageName] = "^" . $package['version-recommended'];
+                                $updateRequired['require'][$packageName] =  "^" . $package['version-recommended'];
                                 // @todo: respect --dry-run option and just show the new constraint ??!?!
                                 $composerJson->write($updateRequired);
                             } catch (\RuntimeException $exception) {
@@ -230,8 +237,6 @@ EOT
 
             foreach ($requiredPackages as $package) {
                 // Load package from local/installed repo
-                // @todo: find a way to use the constraint here, as it avoids unnecessary filtering
-                // $requiredPackage = $installedRepository->findPackage($package->getTarget(), '>= ' . $currentPackageVersion->getVersion());
                 $requiredPackage = $installedRepository->findPackage($package->getTarget(), '*');
 
                 if($requiredPackage && ($requiredPackage->getType() === 'typo3-cms-framework' || $requiredPackage->getType() === 'typo3-cms-extension')) {
