@@ -257,7 +257,7 @@ EOT
         return $currentPackageVersion;
     }
 
-    private function getLatestCoreCompatibleVersion(PackageInterface $currentPackageVersion, InstalledRepositoryInterface $installedRepository, CompositeRepository $remoteRepositories, InputInterface $input): Package
+    private function getLatestCoreCompatibleVersion(PackageInterface $currentPackageVersion, InstalledRepositoryInterface $installedRepository, CompositeRepository $remoteRepositories, InputInterface $input): PackageInterface
     {
         $versions = $this->loadPackageVersions($currentPackageVersion, $remoteRepositories);
 
