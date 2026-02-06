@@ -4,6 +4,13 @@ declare(strict_types=1);
 
 namespace B13\Typo3Updater\Command;
 
+/*
+ * This file is part of the b13/typo3-updater Composer plugin by b13.
+ *
+ * For the full copyright and license information, please read the
+ * LICENSE file that was distributed with this source code.
+ */
+
 use Composer\Command\BaseCommand;
 use Composer\Console\Application;
 use Composer\Console\Input\InputArgument;
@@ -29,36 +36,39 @@ use Symfony\Component\Console\Style\SymfonyStyle;
 
 final class UpdateExtensionsCommand extends BaseCommand
 {
-    protected function configure()
+    protected function configure(): void
     {
         $this
-            ->setName('typo3:update:extensions')
-            ->setDescription('Update all TYPO3 extensions')
-            ->addArgument('version', InputArgument::OPTIONAL, 'TYPO3 version to upgrade to, e.g. ^11.5')
-            ->addOption('--dry-run', null, InputOption::VALUE_NONE, 'Show available updates for packages')
+            ->setName('typo3:extensions:update')
+            ->setDescription('Check and update installed TYPO3 extensions for a target TYPO3 version')
+            ->addArgument('version', InputArgument::REQUIRED, 'TYPO3 version constraint to check against, e.g. ^13.4')
+            ->addOption('--dry-run', null, InputOption::VALUE_NONE, 'Only show compatibility table, do not modify anything')
             ->setHelp(
                 <<<EOT
-Load installed TYPO3 extensions (type: typo3-cms-extension) and check their compatability
-in conjunction with the currently installed TYPO3 version.
+Load installed TYPO3 extensions (type: typo3-cms-extension) and check their compatibility
+against the given target TYPO3 version.
 
 <options=bold,underscore>Features:</>
  * Show available updates (major and minor) compatible with the current TYPO3 version
- * Show extension compatability for the target version of TYPO3 (if 'version' argument is set)
- * Bump version of local packages in required section (question)
- * Update packages to most recent compatible version (question)
+ * Show extension compatibility for the target version of TYPO3
+ * Bump version of local packages in required section (interactive)
+ * Update packages to most recent compatible version (interactive)
+
+Use --dry-run to only display the compatibility table without making changes.
 
 EOT
             );
     }
 
-    protected function execute(InputInterface $input, OutputInterface $output)
+    protected function execute(InputInterface $input, OutputInterface $output): int
     {
         $composer = $this->requireComposer(true, true);
         $rootPackage = $composer->getPackage();
         $io = new SymfonyStyle($input, $output);
-        // @todo: Disable plugins and scripts any good?!
-        $installedRepository = $this->requireComposer(true, true)->getRepositoryManager()->getLocalRepository();
-        $remoteRepositories = new CompositeRepository($this->requireComposer(true, true)->getRepositoryManager()->getRepositories());
+        $installedRepository = $composer->getRepositoryManager()->getLocalRepository();
+        $remoteRepositories = new CompositeRepository($composer->getRepositoryManager()->getRepositories());
+        $isDryRun = (bool)$input->getOption('dry-run');
+        $targetConstraint = $input->getArgument('version');
 
         $core = $installedRepository->findPackage('typo3/cms-core', '*');
 
@@ -68,7 +78,7 @@ EOT
 
         $localPackages = [$rootPackage];
         foreach ($remoteRepositories->getRepositories() as $repository) {
-            if($repository instanceof PathRepository) {
+            if ($repository instanceof PathRepository) {
                 $localPackages = array_merge($localPackages, $repository->getPackages());
             }
         }
@@ -83,43 +93,51 @@ EOT
         }
 
         try {
-            $targetCore = $this->getTargetVersion($core, $input, $remoteRepositories);
+            $targetCore = $this->getTargetVersion($core, $targetConstraint, $remoteRepositories);
         } catch (\RuntimeException $e) {
             $io->error($e->getMessage());
             return Command::FAILURE;
         }
 
+        $isUpgrade = version_compare($targetCore->getVersion(), $core->getVersion(), 'gt');
+        $rootDevRequires = array_keys($rootPackage->getDevRequires());
+
         $coreVersion = $core->getPrettyVersion();
-        // $packages = $installedRepository->getPackages();
         $progressBar = $this->getProgressBar($requiredPackages, $io);
         $rows = [];
         $requirePackageCommands = [];
+        $requireDevPackageCommands = [];
         $processedPackages = [];
 
         foreach ($requiredPackages as $packageName => $requiredBy) {
-            $package = $installedRepository->findPackage($packageName,'*');
-            if($package && $package->getType() === 'typo3-cms-extension') {
+            $package = $installedRepository->findPackage($packageName, '*');
+            if ($package && $package->getType() === 'typo3-cms-extension') {
                 $progressBar->setMessage($package->getName(), 'name');
                 $progressBar->advance();
                 $version = $this->getLatestCompatibleVersion($package, $installedRepository, $remoteRepositories);
 
-                $newVersionAvailable =  version_compare($package->getVersion(), $version->getVersion(), 'lt');
+                $newVersionAvailable = version_compare($package->getVersion(), $version->getVersion(), 'lt');
                 $processedPackages[$version->getName()] = [
                     'name' => $version->getName(),
                     'version-installed' => $package->getPrettyVersion(),
                     'version-recommended' => $newVersionAvailable ? $version->getPrettyVersion() : null,
-                    'compatible-with-current' => $this->isCompatibleWithCore($version, $core->getVersion(), $installedRepository)
+                    'compatible-with-current' => $this->isCompatibleWithCore($version, $core->getVersion(), $installedRepository),
                 ];
 
-                if($newVersionAvailable) {
-                    $requirePackageCommands[] = $version->getName() . ':^' . $version->getPrettyVersion();
+                if ($newVersionAvailable) {
+                    $packageSpec = $version->getName() . ':^' . $version->getPrettyVersion();
+                    if (in_array($version->getName(), $rootDevRequires, true)) {
+                        $requireDevPackageCommands[] = $packageSpec;
+                    } else {
+                        $requirePackageCommands[] = $packageSpec;
+                    }
                 }
 
-                if ($input->getArgument('version')) {
-                    $latestCompatibleForTarget = $this->getLatestCoreCompatibleVersion($package, $installedRepository, $remoteRepositories, $input)->getPrettyVersion();
+                if ($isUpgrade) {
+                    $latestCompatibleForTarget = $this->getLatestCoreCompatibleVersion($package, $installedRepository, $remoteRepositories, $targetConstraint)->getPrettyVersion();
                     $processedPackages[$version->getName()]['compatible-with-next'] = [
-                        'installed' => $this->isCompatibleWithCore($package, $input->getArgument('version'), $installedRepository),
-                        'new' => $this->isCompatibleWithCore($version, $input->getArgument('version'), $installedRepository),
+                        'installed' => $this->isCompatibleWithCore($package, $targetConstraint, $installedRepository),
+                        'new' => $this->isCompatibleWithCore($version, $targetConstraint, $installedRepository),
                         'compatible-with-target' => version_compare($package->getPrettyVersion(), $latestCompatibleForTarget, 'lt') ? $latestCompatibleForTarget : '',
                     ];
                 }
@@ -134,10 +152,10 @@ EOT
                 $package['compatible-with-current'] instanceof Package ? '✅' : '❌',
             ];
 
-            if ($input->getArgument('version')) {
+            if ($isUpgrade) {
                 $nextVersionForTarget = $package['compatible-with-next']['compatible-with-target'];
 
-                if($package['compatible-with-next']['new']) {
+                if ($package['compatible-with-next']['new']) {
                     $next = '⬆️ Update to ' . $package['compatible-with-next']['new']->getPrettyVersion() . ' required';
                 } else {
                     $next = '❌ ' . ($nextVersionForTarget ? 'version ' . $nextVersionForTarget . ' would be compatible ' : '');
@@ -154,38 +172,51 @@ EOT
         $progressBar->finish();
         $io->writeln('');
         $tableHeader = ['Package', 'Version', 'Latest compatible version', $coreVersion];
-
-        if ($input->getArgument('version')) {
-            $tableHeader[] = $input->getArgument('version') . ' (' . $targetCore->getPrettyVersion() . ')';
+        if ($isUpgrade) {
+            $tableHeader[] = $targetConstraint . ' (' . $targetCore->getPrettyVersion() . ')';
         }
 
         $io->table($tableHeader, $rows);
         $io->writeln('<options=bold,underscore>Legend:</>');
         $io->writeln('✅ = is compatible  ❌ = not compatible  ⬆️= compatible after update to latest compatible version');
 
+        if ($isDryRun) {
+            return Command::SUCCESS;
+        }
+
+        $question = new ConfirmationQuestion('Proceed with updating extensions? [Y/n] ', true);
+        if (!$io->askQuestion($question)) {
+            return Command::SUCCESS;
+        }
+
+        // Track original file contents for rollback on failure
+        $modifiedFiles = [];
+
         foreach ($processedPackages as $packageName => $package) {
-            if($package['version-recommended']) {
+            if ($package['version-recommended']) {
                 /** @var CompletePackage $requiredBy */
                 foreach ($requiredPackages[$packageName] as $requiredBy) {
-                    if(!($requiredBy instanceof RootPackage)) {
-                        $requires = $requiredBy->getDistUrl() . '/composer.json';
-                        $composerJson = new JsonFile($requires);
+                    if (!($requiredBy instanceof RootPackage)) {
+                        $filePath = $requiredBy->getDistUrl() . '/composer.json';
+                        $composerJson = new JsonFile($filePath);
                         $updateRequired = $composerJson->read();
 
-                        if($updateRequired['require'][$packageName] === "*") {
+                        if ($updateRequired['require'][$packageName] === '*') {
                             continue;
                         }
 
-                        $question = new ConfirmationQuestion('Bump ' . $packageName . ' version in required section of ' . $requiredBy->getName() . ' to version ' . $package['version-recommended'], false);
+                        $question = new ConfirmationQuestion('Bump ' . $packageName . ' version in required section of ' . $requiredBy->getName() . ' to version ' . $package['version-recommended'] . '? [Y/n] ', true);
                         $answer = $io->askQuestion($question);
 
-                        if($answer) {
-
+                        if ($answer) {
+                            if (!isset($modifiedFiles[$filePath])) {
+                                $modifiedFiles[$filePath] = $composerJson->read();
+                            }
                             try {
-                                $updateRequired['require'][$packageName] =  "^" . $package['version-recommended'];
-                                // @todo: respect --dry-run option and just show the new constraint ??!?!
+                                $updateRequired['require'][$packageName] = '^' . $package['version-recommended'];
                                 $composerJson->write($updateRequired);
                             } catch (\RuntimeException $exception) {
+                                $this->restoreFiles($modifiedFiles);
                                 $io->error($exception->getMessage());
                                 return Command::FAILURE;
                             }
@@ -195,20 +226,35 @@ EOT
             }
         }
 
-        if(!empty($requirePackageCommands)) {
-            $info = ['To update all TYPO3 to the latest compatible version run: ', 'composer req ' . implode(" ", $requirePackageCommands)];
-            $io->info($info);
+        if (!empty($requirePackageCommands)) {
+            $io->info(['To update TYPO3 extensions (require) run: ', 'composer req ' . implode(' ', $requirePackageCommands)]);
 
-            $question = new ConfirmationQuestion('Run the require command show above ?', false);
-            $answer = $io->askQuestion($question);
-            if($answer) {
+            $question = new ConfirmationQuestion('Run the require command shown above? [Y/n] ', true);
+            if ($io->askQuestion($question)) {
                 $application = new Application();
-
-                $arrayInput = new ArrayInput(array('command' => 'require', 'packages' => $requirePackageCommands, '--dry-run' => $input->getOption('dry-run')));
+                $arrayInput = new ArrayInput(['command' => 'require', 'packages' => $requirePackageCommands]);
                 $exitCode = $application->run($arrayInput, $output);
 
                 if ($exitCode) {
-                    $this->getIO()->error('Failed to update TYPO3 extensions with all dependencies. See errors above');
+                    $this->restoreFiles($modifiedFiles);
+                    $this->getIO()->error('Failed to update TYPO3 extensions. All composer.json changes have been reverted.');
+                    return Command::FAILURE;
+                }
+            }
+        }
+
+        if (!empty($requireDevPackageCommands)) {
+            $io->info(['To update TYPO3 extensions (require-dev) run: ', 'composer req --dev ' . implode(' ', $requireDevPackageCommands)]);
+
+            $question = new ConfirmationQuestion('Run the require --dev command shown above? [Y/n] ', true);
+            if ($io->askQuestion($question)) {
+                $application = new Application();
+                $arrayInput = new ArrayInput(['command' => 'require', 'packages' => $requireDevPackageCommands, '--dev' => true]);
+                $exitCode = $application->run($arrayInput, $output);
+
+                if ($exitCode) {
+                    $this->restoreFiles($modifiedFiles);
+                    $this->getIO()->error('Failed to update TYPO3 dev extensions. All composer.json changes have been reverted.');
                     return Command::FAILURE;
                 }
             }
@@ -236,10 +282,9 @@ EOT
             $compatibleVersion = true;
 
             foreach ($requiredPackages as $package) {
-                // Load package from local/installed repo
                 $requiredPackage = $installedRepository->findPackage($package->getTarget(), '*');
 
-                if($requiredPackage && ($requiredPackage->getType() === 'typo3-cms-framework' || $requiredPackage->getType() === 'typo3-cms-extension')) {
+                if ($requiredPackage && ($requiredPackage->getType() === 'typo3-cms-framework' || $requiredPackage->getType() === 'typo3-cms-extension')) {
                     $versionParser = new VersionParser();
                     $requiredConstraint = $versionParser->parseConstraints($requiredPackage->getVersion());
                     if (!$requiredConstraint->matches($package->getConstraint())) {
@@ -248,8 +293,7 @@ EOT
                 }
             }
 
-            // Return the first (latest) compatible version
-            if($compatibleVersion) {
+            if ($compatibleVersion) {
                 return $version;
             }
         }
@@ -257,14 +301,13 @@ EOT
         return $currentPackageVersion;
     }
 
-    private function getLatestCoreCompatibleVersion(PackageInterface $currentPackageVersion, InstalledRepositoryInterface $installedRepository, CompositeRepository $remoteRepositories, InputInterface $input): PackageInterface
+    private function getLatestCoreCompatibleVersion(PackageInterface $currentPackageVersion, InstalledRepositoryInterface $installedRepository, CompositeRepository $remoteRepositories, string $targetConstraint): PackageInterface
     {
         $versions = $this->loadPackageVersions($currentPackageVersion, $remoteRepositories);
 
         /** @var Package $version */
         foreach ($versions['packages'] as $version) {
-            // Return the first (latest) compatible version
-            if($this->isCompatibleWithCore($version, $input->getArgument('version'), $installedRepository)) {
+            if ($this->isCompatibleWithCore($version, $targetConstraint, $installedRepository)) {
                 return $version;
             }
         }
@@ -278,10 +321,9 @@ EOT
         $compatibleVersion = true;
 
         foreach ($requiredPackages as $package) {
-            // Load package from local/installed repo
             $requiredPackage = $installedRepository->findPackage($package->getTarget(), '*');
 
-            if($requiredPackage && $requiredPackage->getType() === 'typo3-cms-framework') {
+            if ($requiredPackage && $requiredPackage->getType() === 'typo3-cms-framework') {
                 $versionParser = new VersionParser();
                 $requiredConstraint = $versionParser->parseConstraints($constraint);
                 if (!$requiredConstraint->matches($package->getConstraint())) {
@@ -290,8 +332,7 @@ EOT
             }
         }
 
-        // Return the first (latest) compatible version
-        if($compatibleVersion) {
+        if ($compatibleVersion) {
             return $packageVersion;
         }
 
@@ -310,21 +351,27 @@ EOT
         return $progressBar;
     }
 
-    private function getTargetVersion(BasePackage $core, InputInterface $input, CompositeRepository $remoteRepositories): ?BasePackage
+    /**
+     * @param array<string, array> $modifiedFiles Map of file path => original parsed content
+     */
+    private function restoreFiles(array $modifiedFiles): void
     {
-        if ($input->getArgument('version')) {
-            $targetCoreVersion = $remoteRepositories->findPackage('typo3/cms-core', $input->getArgument('version'));
-            if (!$targetCoreVersion) {
-                throw new \RuntimeException('No target version found for constraint ' . $input->getArgument('version'));
-            }
+        foreach ($modifiedFiles as $filePath => $originalData) {
+            (new JsonFile($filePath))->write($originalData);
+        }
+    }
 
-            if (version_compare($targetCoreVersion->getVersion(), $core->getVersion(), 'le')) {
-                throw new \RuntimeException('The given constraint ' . $input->getArgument('version') . ' (selected ' . $targetCoreVersion->getVersion() . ')' . ' is not useful to compare with the installed version ' . $core->getVersion() . '. Please pick a newer version!');
-            }
-
-            return $targetCoreVersion;
+    private function getTargetVersion(BasePackage $core, string $targetConstraint, CompositeRepository $remoteRepositories): BasePackage
+    {
+        $targetCoreVersion = $remoteRepositories->findPackage('typo3/cms-core', $targetConstraint);
+        if (!$targetCoreVersion) {
+            throw new \RuntimeException('No target version found for constraint ' . $targetConstraint);
         }
 
-        return null;
+        if (version_compare($targetCoreVersion->getVersion(), $core->getVersion(), 'lt')) {
+            throw new \RuntimeException('The given constraint ' . $targetConstraint . ' (selected ' . $targetCoreVersion->getVersion() . ')' . ' resolves to a version older than the installed version ' . $core->getVersion() . '. Please pick a newer version!');
+        }
+
+        return $targetCoreVersion;
     }
 }
