@@ -25,7 +25,6 @@ use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\ArrayInput;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
-use Symfony\Component\Console\Output\BufferedOutput;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Question\ConfirmationQuestion;
 use Symfony\Component\Console\Style\SymfonyStyle;
@@ -103,6 +102,7 @@ EOT
         if (!empty($extensionUpgrades)) {
             $extensionRows = [];
             $unresolvedRows = [];
+            $unresolvedNames = [];
 
             foreach ($extensionUpgrades as $upgrade) {
                 if ($upgrade['newConstraint']) {
@@ -128,24 +128,39 @@ EOT
                         $upgrade['currentVersion'],
                         $upgrade['coreConstraint'],
                     ];
+                    $unresolvedNames[] = $upgrade['name'];
                 }
             }
 
             if (!empty($extensionRows)) {
-                $io->section('Extensions to upgrade');
-                $io->table(['Extension', 'Installed version', 'Requires typo3/cms-core', 'New version', 'New constraint'], $extensionRows);
+                $io->section('Packages to upgrade');
+                $io->table(['Package', 'Installed version', 'TYPO3 constraint', 'New version', 'New constraint'], $extensionRows);
             }
 
             if (!empty($unresolvedRows)) {
-                $io->section('Extensions without a compatible version');
-                $io->table(['Extension', 'Installed version', 'Requires typo3/cms-core'], $unresolvedRows);
-                $io->warning('The extensions above have no published version compatible with ' . $targetVersion . '. The update may fail.');
+                $io->section('Packages without a compatible version');
+                $io->table(['Package', 'Installed version', 'TYPO3 constraint'], $unresolvedRows);
+                $io->warning('The packages above have no published version compatible with ' . $targetVersion . '.');
             }
         }
 
         if ($isDryRun) {
             $io->note('Dry-run mode: no changes were made.');
             return Command::SUCCESS;
+        }
+
+        // Offer to remove unresolvable packages before proceeding
+        if (!empty($unresolvedNames)) {
+            $removeQuestion = new ConfirmationQuestion(
+                'Remove unresolvable packages (' . implode(', ', $unresolvedNames) . ') from composer.json before updating? [Y/n] ',
+                true
+            );
+            if ($io->askQuestion($removeQuestion)) {
+                foreach ($unresolvedNames as $name) {
+                    unset($updatedData['require'][$name], $updatedData['require-dev'][$name]);
+                    $packagesToUpdate[] = $name;
+                }
+            }
         }
 
         $io->writeln('');
@@ -164,28 +179,19 @@ EOT
         $application = new Application();
         $application->setAutoExit(false);
 
-        $bufferedOutput = new BufferedOutput($output->getVerbosity(), $output->isDecorated());
         $arrayInput = new ArrayInput([
             'command' => 'update',
             'packages' => $packagesToUpdate,
             '-W' => true,
         ]);
-        $exitCode = $application->run($arrayInput, $bufferedOutput);
+        $exitCode = $application->run($arrayInput, $output);
 
         if ($exitCode) {
             $jsonFile->write($originalData);
             $io->error('Failed to update TYPO3 packages. composer.json has been reverted.');
-
-            if ($output->isVerbose()) {
-                $io->section('Composer output');
-                $output->write($bufferedOutput->fetch());
-            } else {
-                $io->note('Run with -v to see the full composer output.');
-            }
             return Command::FAILURE;
         }
 
-        $output->write($bufferedOutput->fetch());
         $io->success('TYPO3 core and extensions updated successfully.');
         return Command::SUCCESS;
     }
@@ -199,17 +205,19 @@ EOT
         'stable' => BasePackage::STABILITY_STABLE,
     ];
 
-    private const ALL_STABILITIES = [
+    private const PRE_RELEASE_STABILITIES = [
         'stable' => BasePackage::STABILITY_STABLE,
         'RC' => BasePackage::STABILITY_RC,
         'beta' => BasePackage::STABILITY_BETA,
         'alpha' => BasePackage::STABILITY_ALPHA,
-        'dev' => BasePackage::STABILITY_DEV,
     ];
 
     /**
-     * Find installed extensions incompatible with the target TYPO3 version
+     * Find installed packages incompatible with the target TYPO3 version
      * and look up their latest compatible version from remote repositories.
+     *
+     * Checks all packages that require any typo3/cms-* package (excluding
+     * the typo3/cms-* packages themselves, which are handled by the core update).
      *
      * @return array<int, array{name: string, currentVersion: string, coreConstraint: string, newConstraint: ?string, newDisplayVersion: ?string, stable: bool}>
      */
@@ -223,34 +231,50 @@ EOT
         $upgrades = [];
 
         foreach ($installedRepository->getPackages() as $package) {
-            if ($package->getType() !== 'typo3-cms-extension') {
+            // Skip typo3/cms-* packages — they are handled by the core update
+            if ($this->isTypo3Package($package->getName())) {
                 continue;
             }
 
+            // Check all typo3/cms-* requirements of this package
+            $incompatibleLinks = [];
             /** @var Link $link */
             foreach ($package->getRequires() as $link) {
-                if ($link->getTarget() === 'typo3/cms-core' && !$targetConstraint->matches($link->getConstraint())) {
-                    // Try stable first, fall back to pre-release versions
-                    $compatibleVersion = $this->findLatestCompatibleVersion($package, $remoteRepositories, $targetVersion, self::STABLE_ONLY);
-                    $stable = true;
-
-                    if (!$compatibleVersion) {
-                        $compatibleVersion = $this->findLatestCompatibleVersion($package, $remoteRepositories, $targetVersion, self::ALL_STABILITIES);
-                        $stable = false;
-                    }
-
-                    [$newConstraint, $newDisplayVersion] = $this->buildVersionStrings($compatibleVersion, $stable);
-
-                    $upgrades[] = [
-                        'name' => $package->getName(),
-                        'currentVersion' => $package->getPrettyVersion(),
-                        'coreConstraint' => $link->getPrettyConstraint(),
-                        'newConstraint' => $newConstraint,
-                        'newDisplayVersion' => $newDisplayVersion,
-                        'stable' => $stable,
-                    ];
+                if ($this->isTypo3Package($link->getTarget()) && !$targetConstraint->matches($link->getConstraint())) {
+                    $incompatibleLinks[] = $link;
                 }
             }
+
+            if (empty($incompatibleLinks)) {
+                continue;
+            }
+
+            // Build a human-readable summary of the incompatible constraints
+            $constraintParts = [];
+            foreach ($incompatibleLinks as $link) {
+                $constraintParts[] = $link->getTarget() . ': ' . $link->getPrettyConstraint();
+            }
+            $coreConstraint = implode(', ', $constraintParts);
+
+            // Try stable first, fall back to pre-release versions
+            $compatibleVersion = $this->findLatestCompatibleVersion($package, $remoteRepositories, $targetVersion, self::STABLE_ONLY);
+            $stable = true;
+
+            if (!$compatibleVersion) {
+                $compatibleVersion = $this->findLatestCompatibleVersion($package, $remoteRepositories, $targetVersion, self::PRE_RELEASE_STABILITIES);
+                $stable = false;
+            }
+
+            [$newConstraint, $newDisplayVersion] = $this->buildVersionStrings($compatibleVersion, $stable);
+
+            $upgrades[] = [
+                'name' => $package->getName(),
+                'currentVersion' => $package->getPrettyVersion(),
+                'coreConstraint' => $coreConstraint,
+                'newConstraint' => $newConstraint,
+                'newDisplayVersion' => $newDisplayVersion,
+                'stable' => $stable,
+            ];
         }
 
         return $upgrades;
@@ -271,16 +295,6 @@ EOT
 
         if ($stable) {
             return ['^' . $prettyVersion, $prettyVersion];
-        }
-
-        // Dev packages: use the branch alias (dev-main, dev-master, etc.)
-        if ($package->isDev()) {
-            $sourceRef = $package->getSourceReference();
-            $displayVersion = $prettyVersion;
-            if ($sourceRef) {
-                $displayVersion .= ' (' . substr($sourceRef, 0, 7) . ')';
-            }
-            return [$prettyVersion, $displayVersion];
         }
 
         // Pre-release (RC, beta, alpha): use exact version
@@ -305,11 +319,20 @@ EOT
         );
 
         foreach ($results['packages'] as $candidate) {
+            $compatible = true;
+            $hasTypo3Requirement = false;
             /** @var Link $link */
             foreach ($candidate->getRequires() as $link) {
-                if ($link->getTarget() === 'typo3/cms-core' && $targetConstraint->matches($link->getConstraint())) {
-                    return $candidate;
+                if ($this->isTypo3Package($link->getTarget())) {
+                    $hasTypo3Requirement = true;
+                    if (!$targetConstraint->matches($link->getConstraint())) {
+                        $compatible = false;
+                        break;
+                    }
                 }
+            }
+            if ($hasTypo3Requirement && $compatible) {
+                return $candidate;
             }
         }
 
