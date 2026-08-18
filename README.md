@@ -18,7 +18,7 @@ composer require b13/typo3-updater
 You can set it up for all your projects in a global way:
 
 ```bash
-composer require global b13/typo3-updater
+composer global require b13/typo3-updater
 ```
 
 ## Upgrade workflow
